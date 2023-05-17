@@ -12,7 +12,7 @@ envoy_cc_binary(
     repository = "@envoy",
     linkopts = select({
         "@bazel_tools//src/conditions:darwin": ["-framework Security"],
-        "//conditions:default": [],
+        "//conditions:default": ["-lrt"],
     }),
     deps = [
         "//egofilters:ego_filter_protos",
