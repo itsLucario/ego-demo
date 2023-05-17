@@ -35,33 +35,49 @@ func newGetHeaderFilter(settings *pb.Settings, native envoy.GoHttpFilter) ego.Ht
 func (f *getHeaderFilter) DecodeHeaders(headers envoy.RequestHeaderMap, endStream bool) headersstatus.Type {
 	// keep headers for use later in onPost
 	f.requestHeaders = headers
+	if headers.Get("filter-type") == "non-block" {
+		f.Pin() // must do this for every go-routine
+		go func() {
+			defer f.Unpin() // must do this for every go-routine. Includes f.Recover()
 
-	f.Pin() // must do this for every go-routine
-	go func() {
-		defer f.Unpin() // must do this for every go-routine. Includes f.Recover()
+			f.Context.Done()
+			request, err := http.NewRequestWithContext(f.Context, "GET", f.settings.Src, nil)
+			if err != nil {
+				// Send local repsonse
+				f.httpErr = err
+				f.Native.Post(0)
+				return
+			}
 
-		f.Context.Done()
+			client := http.Client{
+				Timeout: 2 * time.Second,
+			}
+			f.httpResponse, f.httpErr = client.Do(request)
+
+			// In this demo we only need one http-call at a time
+			// so tag = 0 because we don't need to manage multiple callback
+			f.Native.Post(0)
+		}()
+		// If we turn `headersstatus.Continue` on `DecodeHeaders` from Go side
+		// Although we call a http request with a goroutine and defer `defer f.Release()` so there is a chance
+		// for onDestroy happened before goroutine DONE and call a post to dispatcher. ()
+		return headersstatus.StopAllIterationAndWatermark
+	} else {
 		request, err := http.NewRequestWithContext(f.Context, "GET", f.settings.Src, nil)
 		if err != nil {
 			// Send local repsonse
 			f.httpErr = err
-			f.Native.Post(0)
-			return
+			return headersstatus.Continue
 		}
 
 		client := http.Client{
 			Timeout: 2 * time.Second,
 		}
 		f.httpResponse, f.httpErr = client.Do(request)
-
-		// In this demo we only need one http-call at a time
-		// so tag = 0 because we don't need to manage multiple callback
-		f.Native.Post(0)
-	}()
-	// If we turn `headersstatus.Continue` on `DecodeHeaders` from Go side
-	// Although we call a http request with a goroutine and defer `defer f.Release()` so there is a chance
-	// for onDestroy happened before goroutine DONE and call a post to dispatcher. ()
-	return headersstatus.StopAllIterationAndWatermark
+		respHeader := f.httpResponse.Header.Get(f.settings.Hdr)
+		f.requestHeaders.AddCopy(f.settings.Key, respHeader)
+		return headersstatus.Continue
+	}
 }
 
 func (f *getHeaderFilter) OnPost(tag uint64) {
